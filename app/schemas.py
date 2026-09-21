@@ -76,6 +76,27 @@ class AuditResponse(BaseModel):
     )
 
 
+class HallWitness(BaseModel):
+    """Hall 定理违例证书，证明不存在完美匹配。
+
+    由最大匹配经交替路径构造：``reviewer_ids`` 为从所有未匹配评审人出发
+    沿交替方向（非匹配边 评审人→稿件、匹配边 稿件→评审人）可达的评审人
+    子集；``neighboring_manuscript_ids`` 恰为该子集在原 allowed_pairings
+    中的全部邻居，故 ``|邻居| < |评审人|``，违反 Hall 条件。
+    """
+
+    reviewer_ids: list[str] = Field(
+        description="Hall 违例评审人子集（按 ID 排序）"
+    )
+    neighboring_manuscript_ids: list[str] = Field(
+        description="上述评审人在原 allowed_pairings 中的全部邻居稿件（按 ID 排序）"
+    )
+    deficiency: int = Field(
+        ge=1,
+        description="缺口：评审人数 - 邻居稿件数，等于全局未匹配人数",
+    )
+
+
 class ConflictResponse(BaseModel):
     """不存在完美匹配时的 409 响应（绝不返回部分成功）。"""
 
@@ -86,3 +107,6 @@ class ConflictResponse(BaseModel):
     )
     unmatched_reviewer_ids: list[str] = Field(description="未匹配的评审人 ID（已排序）")
     unmatched_manuscript_ids: list[str] = Field(description="未匹配的稿件 ID（已排序）")
+    hall_witness: HallWitness = Field(
+        description="Hall 定理违例证书：评审人子集的邻居数严格少于评审人数"
+    )

@@ -71,10 +71,13 @@ def test_audit_matches_bruteforce(seed):
         # 确定性：与字典序最小的 null-aware 最大匹配一致。
         canon = lex_smallest_bruteforce(reviewers, manuscripts, edges, perfects)
         assert sorted(result.pairs) == sorted(canon)
+
+        check_hall_witness(result, reviewers, manuscripts, edges)
         return
 
     assert result.perfect_match_exists is True
     assert result.max_matching_size == n
+    assert result.hall_witness is None
 
     sorted_r = sorted(reviewers)
     canonical = min(perfects, key=lex_key)
@@ -126,6 +129,87 @@ def lex_smallest_bruteforce(reviewers, manuscripts, edges, perfects):
         key=lex_key,
     )
     return [(r, m) for r, m in zip(r_sorted, best_seq) if m is not None]
+
+
+def check_hall_witness(result, reviewers, manuscripts, edges):
+    """校验 409 的 Hall 违例证书：邻居精确性、缺口、排序及 Hall 最优性。"""
+    witness = result.hall_witness
+    assert witness is not None
+
+    rids = witness.reviewer_ids
+    mids = witness.neighboring_manuscript_ids
+
+    # 列表排序且无重复。
+    assert rids == sorted(set(rids))
+    assert mids == sorted(set(mids))
+    # 证书中的评审人与稿件均为合法引用。
+    assert set(rids) <= set(reviewers)
+    assert set(mids) <= set(manuscripts)
+    # 违例子集必须非空（无完美匹配时 Hall 必有违例）。
+    assert rids
+
+    # 稿件集合恰为这些评审人在**原 allowed_pairings** 中的全部邻居。
+    adj = {r: set() for r in reviewers}
+    for r, m in edges:
+        adj[r].add(m)
+    true_neighbors = set().union(*(adj[r] for r in rids))
+    assert set(mids) == true_neighbors
+
+    # deficiency = 评审人数 - 邻居数 = 全局未匹配人数（两侧相等）。
+    assert witness.deficiency == len(rids) - len(mids)
+    assert witness.deficiency == len(result.unmatched_reviewers)
+    assert witness.deficiency == len(result.unmatched_manuscripts)
+    assert witness.deficiency >= 1
+
+    # Hall 最优性（暴力）：该子集缺口不小于任何评审人子集的缺口，
+    # 且恰为 n - 最大匹配基数；n ≤ 4，枚举全部 2^n 子集。
+    max_gap = 0
+    for k in range(len(reviewers) + 1):
+        for subset in itertools.combinations(sorted(reviewers), k):
+            neighbors = {m for r in subset for m in adj[r]}
+            max_gap = max(max_gap, len(subset) - len(neighbors))
+    assert max_gap == witness.deficiency
+
+
+def test_hall_witness_multiple_gaps():
+    """算法层：3 名评审人共享 1 篇稿件，缺口为 2；链外强制边不卷入。"""
+    reviewers = ["r0", "r1", "r2", "r3"]
+    manuscripts = ["m0", "m1", "m2", "m3"]
+    edges = [
+        ("r0", "m0"),
+        ("r1", "m1"),
+        ("r2", "m1"),
+        ("r3", "m1"),
+    ]
+    result = run_audit(reviewers, manuscripts, edges)
+    assert result.perfect_match_exists is False
+    assert result.max_matching_size == 2
+    witness = result.hall_witness
+    assert witness.reviewer_ids == ["r1", "r2", "r3"]
+    assert witness.neighboring_manuscript_ids == ["m1"]
+    assert witness.deficiency == 2
+
+
+def test_hall_witness_nonobvious_alternating_chain():
+    """算法层：证书经交替链包含已匹配评审人（非显然子集）。"""
+    reviewers = ["r0", "r1", "r2", "r3"]
+    manuscripts = ["m0", "m1", "m2", "m3"]
+    edges = [
+        ("r0", "m1"),
+        ("r1", "m0"),
+        ("r1", "m1"),
+        ("r2", "m0"),
+        ("r2", "m1"),
+        ("r3", "m2"),
+    ]
+    result = run_audit(reviewers, manuscripts, edges)
+    assert result.perfect_match_exists is False
+    witness = result.hall_witness
+    assert witness.reviewer_ids == ["r0", "r1", "r2"]
+    assert witness.neighboring_manuscript_ids == ["m0", "m1"]
+    assert witness.deficiency == 1
+    assert result.unmatched_reviewers == ["r0"]
+    assert result.unmatched_manuscripts == ["m3"]
 
 
 def test_known_forced_edges():

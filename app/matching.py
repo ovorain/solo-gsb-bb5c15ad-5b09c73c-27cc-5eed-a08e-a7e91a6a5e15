@@ -27,8 +27,22 @@
   **完整的**、合法的、不含 (r, m) 的完美匹配，作为替代分配（witness）。
 
 邻接按节点 ID 排序，使 BFS 与全部输出确定性。
+
+Hall 违例证据（409）
+--------------------
+对最大匹配 M 沿用上面的交替有向图，从**全部未匹配评审人**出发做有向
+遍历，可达点集记为 Z。M 最大 => 不存在增广路 => Z 中没有未匹配稿件；
+匹配边在 (Z ∩ 评审人) 与 (Z ∩ 稿件) 间构成双射，因此：
+
+    N(Z ∩ 评审人) = Z ∩ 稿件
+    |Z ∩ 评审人| - |Z ∩ 稿件| = 未匹配评审人数 = n - |M|
+
+即 (Z ∩ 评审人) 是 Hall 定理违例子集，缺口恰为全局未匹配人数。
+证书中的稿件集合在**原图**上重新收集，严格等于这些评审人在原
+allowed_pairings 中的全部邻居；所有列表按 ID 排序输出。
 """
 
+from collections import deque
 from dataclasses import dataclass, field
 
 import networkx as nx
@@ -87,6 +101,21 @@ def _max_matching_size(graph: nx.Graph) -> int:
     return len(matching) // 2
 
 
+@dataclass(frozen=True)
+class HallWitness:
+    """Hall 定理违例证书：``|N(reviewer_ids)| < |reviewer_ids|``。
+
+    - ``reviewer_ids``：交替路径可达的评审人子集（违例子集，按 ID 排序）；
+    - ``neighboring_manuscript_ids``：该子集在原 allowed_pairings 中的
+      **全部**邻居（按 ID 排序）；
+    - ``deficiency``：评审人数 - 邻居数，等于全局未匹配人数。
+    """
+
+    reviewer_ids: list[str]
+    neighboring_manuscript_ids: list[str]
+    deficiency: int
+
+
 @dataclass
 class AuditResult:
     """算法层审计结果。"""
@@ -97,6 +126,8 @@ class AuditResult:
     max_matching_size: int
     unmatched_reviewers: list[str] = field(default_factory=list)
     unmatched_manuscripts: list[str] = field(default_factory=list)
+    #: 仅失败（409）时存在：Hall 违例证书。
+    hall_witness: HallWitness | None = None
 
 
 def lex_smallest_matching(
@@ -253,6 +284,75 @@ def _cycle_alternative(
     return alternative
 
 
+def _hall_witness(
+    graph: nx.Graph,
+    pairs: list[tuple[str, str]],
+    unmatched_reviewers: list[str],
+) -> HallWitness:
+    """由最大匹配构造 Hall 违例证书（交替路径法）。
+
+    从所有未匹配评审人出发，沿交替方向（非匹配边 评审人→稿件，
+    匹配边 稿件→评审人）遍历。M 最大 => 无增广路 => 可达稿件全部已匹配，
+    可达评审人集合 R 满足 |N(R)| = |R| - 未匹配评审人数，即 Hall 违例。
+    """
+    mate_m_to_r: dict[tuple[str, str], tuple[str, str]] = {
+        _mnode(mid): _rnode(rid) for rid, mid in pairs
+    }
+    mate_r_to_m: dict[tuple[str, str], tuple[str, str]] = {
+        _rnode(rid): _mnode(mid) for rid, mid in pairs
+    }
+
+    seen_reviewers: set[tuple[str, str]] = set()
+    seen_manuscripts: set[tuple[str, str]] = set()
+    queue: deque[tuple[str, str]] = deque()
+    for reviewer_id in unmatched_reviewers:
+        rnode = _rnode(reviewer_id)
+        if rnode not in seen_reviewers:
+            seen_reviewers.add(rnode)
+            queue.append(rnode)
+
+    while queue:
+        current = queue.popleft()
+        if current[0] == REVIEWER:
+            # 非匹配边 评审人 -> 稿件；自身匹配边在 D 中方向相反，跳过。
+            matched = mate_r_to_m.get(current)
+            for nxt in sorted(graph.adj[current], key=_node_key):
+                if nxt != matched and nxt not in seen_manuscripts:
+                    seen_manuscripts.add(nxt)
+                    queue.append(nxt)
+        else:
+            # 稿件节点：仅沿匹配边 稿件 -> 评审人 继续。
+            nxt = mate_m_to_r.get(current)
+            if nxt is not None and nxt not in seen_reviewers:
+                seen_reviewers.add(nxt)
+                queue.append(nxt)
+
+    # 证书的稿件集合必须恰为这些评审人在**原图**中的全部邻居。
+    original_neighbors = {
+        mnode
+        for rnode in seen_reviewers
+        for mnode in graph.adj[rnode]
+        if mnode[0] == MANUSCRIPT
+    }
+    # 不变量（Berge/增广路定理）：交替可达稿件 == 可达评审人的全部邻居。
+    # - 非匹配邻居经 r->m 一步即可达；
+    # - 可达的已匹配评审人必是经其匹配稿件 m->r 到达的，故其匹配稿件也在集合内。
+    assert original_neighbors == seen_manuscripts
+
+    reviewer_ids = sorted(node[1] for node in seen_reviewers)
+    neighboring_manuscript_ids = sorted(node[1] for node in seen_manuscripts)
+    deficiency = len(reviewer_ids) - len(neighboring_manuscript_ids)
+
+    # Hall 缺口恰为全局未匹配人数（匹配边在两侧可达点间为双射）。
+    assert deficiency == len(unmatched_reviewers)
+
+    return HallWitness(
+        reviewer_ids=reviewer_ids,
+        neighboring_manuscript_ids=neighboring_manuscript_ids,
+        deficiency=deficiency,
+    )
+
+
 def run_audit(
     reviewers: list[str],
     manuscripts: list[str],
@@ -263,19 +363,23 @@ def run_audit(
     reviewers_sorted = sorted(reviewers)
     max_size = _max_matching_size(graph)
 
-    # 不存在完美匹配：给出确定性的最大匹配及未匹配双方。
+    # 不存在完美匹配：给出确定性的最大匹配、未匹配双方与 Hall 违例证书。
     if max_size != len(reviewers):
         pairs = lex_smallest_matching(graph, reviewers_sorted, max_size)
         # 目标基数由全局最大匹配保证可行；防御性断言。
         assert pairs is not None
         matched_reviewers = {r for r, _ in pairs}
         matched_manuscripts = {m for _, m in pairs}
+        unmatched_reviewer_ids = sorted(set(reviewers) - matched_reviewers)
+        unmatched_manuscript_ids = sorted(set(manuscripts) - matched_manuscripts)
+        witness = _hall_witness(graph, pairs, unmatched_reviewer_ids)
         return AuditResult(
             perfect_match_exists=False,
             pairs=pairs,
             max_matching_size=max_size,
-            unmatched_reviewers=sorted(set(reviewers) - matched_reviewers),
-            unmatched_manuscripts=sorted(set(manuscripts) - matched_manuscripts),
+            unmatched_reviewers=unmatched_reviewer_ids,
+            unmatched_manuscripts=unmatched_manuscript_ids,
+            hall_witness=witness,
         )
 
     # 存在完美匹配：取字典序最小的确定性分配。
