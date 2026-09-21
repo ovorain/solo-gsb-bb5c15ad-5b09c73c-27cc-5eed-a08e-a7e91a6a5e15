@@ -76,6 +76,26 @@ class AuditResponse(BaseModel):
     )
 
 
+class HallWitness(BaseModel):
+    """Hall 定理证人：一组评审人，其可评稿件总数少于人数。
+
+    - ``neighboring_manuscript_ids`` 恰为 ``reviewer_ids`` 在原
+      ``allowed_pairings`` 中的全部邻居（不多不少）；
+    - ``deficiency`` = 评审人数 − 邻居数，恒等于全局未匹配评审人数；
+    - 两个 ID 列表均按 ID 升序，相同输入结果稳定。
+    """
+
+    reviewer_ids: list[str] = Field(
+        description="违反 Hall 条件的评审人子集（已排序，非空）"
+    )
+    neighboring_manuscript_ids: list[str] = Field(
+        description="上述评审人在原允许配对中的全部邻居（已排序，可为空）"
+    )
+    deficiency: int = Field(
+        description="评审人数 − 邻居数，等于全局未匹配评审人数（≥1）"
+    )
+
+
 class ConflictResponse(BaseModel):
     """不存在完美匹配时的 409 响应（绝不返回部分成功）。"""
 
@@ -86,3 +106,6 @@ class ConflictResponse(BaseModel):
     )
     unmatched_reviewer_ids: list[str] = Field(description="未匹配的评审人 ID（已排序）")
     unmatched_manuscript_ids: list[str] = Field(description="未匹配的稿件 ID（已排序）")
+    hall_witness: HallWitness = Field(
+        description="Hall 定理证人：由交替路径构造的缺口子集及其全部邻居"
+    )

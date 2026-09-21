@@ -9,7 +9,8 @@
 4. 对每个非强制配对，附一组**完整的替代分配**：它本身也是完美匹配，且不包含被审计的这对边。
 
 - 存在完美匹配 → `200`
-- 不存在完美匹配 → `409`，返回基数最大的匹配以及未匹配的评审人/稿件 ID，**不返回部分成功**
+- 不存在完美匹配 → `409`，返回基数最大的匹配、未匹配的评审人/稿件 ID，
+  以及一份 **Hall 定理证人**（`hall_witness`），**不返回部分成功**
 - 重复 ID、重复配对、未知引用、数量不等、空列表等输入问题 → `422`，错误定位到具体字段与下标
 
 技术栈：Python · FastAPI · Pydantic v2 · NetworkX（Hopcroft–Karp + 交替有向图强连通分量）。
@@ -117,19 +118,73 @@ curl -s -X POST http://localhost:8000/audit \
 ```json
 {
   "perfect_match_exists": false,
-  "detail": "不存在完美匹配；以下为基数最大的匹配及未匹配双方。",
+  "detail": "不存在完美匹配；以下为基数最大的匹配、未匹配双方及 Hall 定理证人。",
   "maximum_matching": [
     {"reviewer_id": "r0", "manuscript_id": "m0"},
     {"reviewer_id": "r1", "manuscript_id": "m1"}
   ],
   "unmatched_reviewer_ids": ["r2"],
-  "unmatched_manuscript_ids": ["m2"]
+  "unmatched_manuscript_ids": ["m2"],
+  "hall_witness": {
+    "reviewer_ids": ["r2"],
+    "neighboring_manuscript_ids": [],
+    "deficiency": 1
+  }
 }
 ```
 
 `maximum_matching` 为完整展开的基数最大匹配（确定性规则：同样按评审人 ID 升序、
 字典序最小），并分别给出两侧无法匹配的 ID。响应不包含 `assignment`，
 不存在“部分成功”。
+
+`hall_witness` 是 **Hall 定理证人**——一组可评稿件总数少于人数的评审人，
+直接解释了为何不可能完美分配：
+
+- `reviewer_ids`：违反 Hall 条件的评审人子集 S（按 ID 升序，非空）；
+- `neighboring_manuscript_ids`：S 在原 `allowed_pairings` 中的**全部**邻居
+  （按 ID 升序，可为空）——不多不少，恰为这群评审人所有可评的稿件；
+- `deficiency`：`|S| − |N(S)|`，恒等于全局未匹配评审人数
+  （即 `unmatched_reviewer_ids` 的长度）。
+
+证人由确定性最大匹配出发、沿交替路径构造：从未匹配评审人开始，
+沿「非匹配边 评审人→稿件、匹配边 稿件→评审人」遍历所有可达节点，
+其中的评审人即 S、稿件即 N(S)。相同输入必得相同证人。
+
+一个非平凡例子（`r0` 未匹配，但它自己有两个邻居，单看并不违规；
+沿交替路径可达 `r1`、`r2` 后才暴露出 3 人共享 2 篇稿件的缺口）：
+
+```bash
+curl -s -X POST http://localhost:8000/audit \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "reviewers": ["r0", "r1", "r2"],
+    "manuscripts": ["m0", "m1", "m2"],
+    "allowed_pairings": [
+      {"reviewer_id": "r0", "manuscript_id": "m0"},
+      {"reviewer_id": "r0", "manuscript_id": "m1"},
+      {"reviewer_id": "r1", "manuscript_id": "m0"},
+      {"reviewer_id": "r2", "manuscript_id": "m1"}
+    ]
+  }'
+```
+
+```json
+{
+  "perfect_match_exists": false,
+  "detail": "不存在完美匹配；以下为基数最大的匹配、未匹配双方及 Hall 定理证人。",
+  "maximum_matching": [
+    {"reviewer_id": "r1", "manuscript_id": "m0"},
+    {"reviewer_id": "r2", "manuscript_id": "m1"}
+  ],
+  "unmatched_reviewer_ids": ["r0"],
+  "unmatched_manuscript_ids": ["m2"],
+  "hall_witness": {
+    "reviewer_ids": ["r0", "r1", "r2"],
+    "neighboring_manuscript_ids": ["m0", "m1"],
+    "deficiency": 1
+  }
+}
+```
 
 ### 422 响应（输入校验失败）
 
@@ -184,6 +239,12 @@ curl -s -X POST http://localhost:8000/audit \
   即可求出全部强制边。
 - **替代分配**：对非强制边，在交替有向图中用邻接有序的 BFS 找最短交替环，
   环上匹配/非匹配边身份翻转，得到一个完整、合法、确定性且不含被审计边的完美匹配。
+- **Hall 定理证人（409）**：取字典序最小的最大匹配 M，从未匹配评审人出发，
+  在同一交替有向图中遍历可达节点集 Z。Z 中的稿件必已全部匹配
+  （否则存在增广路，与最大性矛盾），故取 S = Z ∩ 评审人时，
+  N(S) 恰为 Z ∩ 稿件，且 `|S| − |N(S)|` = 未匹配评审人数 = 全局缺口
+  （Kőnig–Ore 定理）。源点与邻接均按 ID 排序，可达集与遍历顺序无关，
+  证人对相同输入完全确定。
 
 适用规模：典型会议量级（两侧各 ≤100、每人若干候选）亚秒级完成；
 数百规模也可在数秒级返回。
@@ -194,11 +255,11 @@ curl -s -X POST http://localhost:8000/audit \
 app/
   __init__.py
   main.py        # FastAPI 路由、422/409 语义校验与响应组装
-  matching.py    # 二部图、确定性匹配、SCC 强制性、交替环替代分配
+  matching.py    # 二部图、确定性匹配、SCC 强制性、交替环替代分配、Hall 证人
   schemas.py     # Pydantic 请求/响应模型
 tests/
-  test_api.py    # HTTP 层：200/409/422 与错误定位
-  test_matching.py# 算法层：200 组随机图全排列暴力交叉验证
+  test_api.py    # HTTP 层：200/409/422、Hall 证人与错误定位
+  test_matching.py# 算法层：200 组随机图全排列暴力交叉验证 + Hall 证人不变量
 Dockerfile
 docker-compose.yml
 requirements.txt

@@ -1,7 +1,8 @@
 """FastAPI 应用：POST /audit。
 
 - 200：存在完美匹配，返回字典序最小的确定性分配及逐对强制性。
-- 409：不存在完美匹配，返回最大匹配与未匹配双方 ID（无部分成功）。
+- 409：不存在完美匹配，返回最大匹配、未匹配双方 ID 与 Hall 定理证人
+  （无部分成功）。
 - 422：重复 ID、重复配对、未知引用、数量不等、空列表等，错误定位到具体字段/下标。
 """
 
@@ -16,6 +17,7 @@ from .schemas import (
     AuditRequest,
     AuditResponse,
     ConflictResponse,
+    HallWitness,
     OutputPair,
 )
 
@@ -81,13 +83,21 @@ async def audit(request: AuditRequest) -> AuditResponse | ConflictResponse:
     )
 
     if not result.perfect_match_exists:
+        witness = result.hall_witness
+        # 409 分支由 run_audit 保证证人存在；防御性断言。
+        assert witness is not None
         conflict = ConflictResponse(
-            detail="不存在完美匹配；以下为基数最大的匹配及未匹配双方。",
+            detail="不存在完美匹配；以下为基数最大的匹配、未匹配双方及 Hall 定理证人。",
             maximum_matching=[
                 OutputPair(reviewer_id=r, manuscript_id=m) for r, m in result.pairs
             ],
             unmatched_reviewer_ids=result.unmatched_reviewers,
             unmatched_manuscript_ids=result.unmatched_manuscripts,
+            hall_witness=HallWitness(
+                reviewer_ids=witness.reviewer_ids,
+                neighboring_manuscript_ids=witness.neighboring_manuscript_ids,
+                deficiency=witness.deficiency,
+            ),
         )
         # JSONResponse 以携带 409；模型经 model_dump 序列化，schema 已在 responses 声明。
         return JSONResponse(

@@ -10,6 +10,17 @@
 - 每次决策都用「剩余子图的最大匹配基数」做可行性预言，
   预言由 Hopcroft–Karp 完成：``networkx.bipartite.hopcroft_karp_matching``。
 
+Hall 定理证人（409 时）
+------------------------
+不存在完美匹配时，取确定性最大匹配 M，从未匹配评审人出发沿
+M-交替路径（同一交替有向图定向）遍历可达节点 Z：
+
+- Z 中的稿件必然全部已被 M 匹配，否则该路径即增广路，与最大性矛盾；
+- 取 S = Z ∩ 评审人，则其在原图中的邻居恰为 Z ∩ 稿件，
+  且 |S| - |N(S)| = 未匹配评审人数 = 全局缺口（Kőnig–Ore 定理）。
+
+该 S 即违反 Hall 条件的子集，作为 409 响应中的 ``hall_witness``。
+
 强制性判定与替代分配
 --------------------
 对完美匹配 M 构造交替有向图 D：
@@ -88,6 +99,21 @@ def _max_matching_size(graph: nx.Graph) -> int:
 
 
 @dataclass
+class HallWitness:
+    """Hall 定理证人：违反 Hall 条件的评审人子集。
+
+    - ``reviewer_ids``：缺口评审人集合 S（已按 ID 排序）；
+    - ``neighboring_manuscript_ids``：S 在原允许配对中的**全部**邻居
+      （已按 ID 排序）；
+    - ``deficiency``：``|S| - |N(S)|``，恒等于全局未匹配评审人数。
+    """
+
+    reviewer_ids: list[str]
+    neighboring_manuscript_ids: list[str]
+    deficiency: int
+
+
+@dataclass
 class AuditResult:
     """算法层审计结果。"""
 
@@ -97,6 +123,8 @@ class AuditResult:
     max_matching_size: int
     unmatched_reviewers: list[str] = field(default_factory=list)
     unmatched_manuscripts: list[str] = field(default_factory=list)
+    #: 仅 409（不存在完美匹配）时填充。
+    hall_witness: HallWitness | None = None
 
 
 def lex_smallest_matching(
@@ -158,9 +186,9 @@ def lex_smallest_matching(
 
 def _build_alternating_digraph(
     graph: nx.Graph,
-    canonical: list[tuple[str, str]],
+    matching: list[tuple[str, str]],
 ) -> nx.DiGraph:
-    """由完美匹配 canonical 构造交替有向图 D。
+    """由匹配 matching（不必完美）构造交替有向图 D。
 
     匹配边定向 稿件 -> 评审人；非匹配边定向 评审人 -> 稿件。
     """
@@ -168,7 +196,7 @@ def _build_alternating_digraph(
     digraph.add_nodes_from(graph.nodes())
     matched_edges = {
         (_rnode(reviewer_id), _mnode(manuscript_id))
-        for reviewer_id, manuscript_id in canonical
+        for reviewer_id, manuscript_id in matching
     }
     for u, v in graph.edges():
         rnode = u if u[0] == REVIEWER else v
@@ -253,6 +281,56 @@ def _cycle_alternative(
     return alternative
 
 
+def hall_witness(
+    graph: nx.Graph,
+    matching: list[tuple[str, str]],
+    unmatched_reviewers: list[str],
+) -> HallWitness:
+    """由最大匹配出发，沿交替路径构造 Hall 定理证人。
+
+    以未匹配评审人为源，在交替有向图（匹配边 稿件→评审人，非匹配边
+    评审人→稿件）中遍历可达节点集 Z：
+
+    - Z 中的稿件全部已被匹配，否则该交替路径即增广路，与最大性矛盾；
+    - 取 S = Z ∩ 评审人：S 中已匹配者的匹配边沿路径反向可达，未匹配者
+      的任意邻居沿非匹配边可达，故 S 在原图中的邻居恰为 Z ∩ 稿件；
+    - Z ∩ 稿件与 S 中已匹配者一一配对，故
+      ``|S| - |N(S)|`` = 未匹配评审人数 = 全局缺口。
+
+    源点与邻接均按 ID 排序，且可达集与遍历顺序无关，结果完全确定。
+    """
+    digraph = _build_alternating_digraph(graph, matching)
+    sources = sorted(
+        (_rnode(reviewer_id) for reviewer_id in unmatched_reviewers),
+        key=_node_key,
+    )
+    reachable: set[tuple[str, str]] = set(sources)
+    queue = list(sources)
+    head = 0
+    while head < len(queue):
+        current = queue[head]
+        head += 1
+        for nxt in _sorted_successors(digraph, current):
+            if nxt not in reachable:
+                reachable.add(nxt)
+                queue.append(nxt)
+
+    witness_reviewers = sorted(
+        node_id for side, node_id in reachable if side == REVIEWER
+    )
+    witness_manuscripts = sorted(
+        node_id for side, node_id in reachable if side == MANUSCRIPT
+    )
+    deficiency = len(witness_reviewers) - len(witness_manuscripts)
+    # 交替路径理论保证缺口恰为全局未匹配人数；防御性断言。
+    assert deficiency == len(unmatched_reviewers)
+    return HallWitness(
+        reviewer_ids=witness_reviewers,
+        neighboring_manuscript_ids=witness_manuscripts,
+        deficiency=deficiency,
+    )
+
+
 def run_audit(
     reviewers: list[str],
     manuscripts: list[str],
@@ -263,19 +341,21 @@ def run_audit(
     reviewers_sorted = sorted(reviewers)
     max_size = _max_matching_size(graph)
 
-    # 不存在完美匹配：给出确定性的最大匹配及未匹配双方。
+    # 不存在完美匹配：给出确定性的最大匹配、未匹配双方及 Hall 定理证人。
     if max_size != len(reviewers):
         pairs = lex_smallest_matching(graph, reviewers_sorted, max_size)
         # 目标基数由全局最大匹配保证可行；防御性断言。
         assert pairs is not None
         matched_reviewers = {r for r, _ in pairs}
         matched_manuscripts = {m for _, m in pairs}
+        unmatched_reviewers = sorted(set(reviewers) - matched_reviewers)
         return AuditResult(
             perfect_match_exists=False,
             pairs=pairs,
             max_matching_size=max_size,
-            unmatched_reviewers=sorted(set(reviewers) - matched_reviewers),
+            unmatched_reviewers=unmatched_reviewers,
             unmatched_manuscripts=sorted(set(manuscripts) - matched_manuscripts),
+            hall_witness=hall_witness(graph, pairs, unmatched_reviewers),
         )
 
     # 存在完美匹配：取字典序最小的确定性分配。

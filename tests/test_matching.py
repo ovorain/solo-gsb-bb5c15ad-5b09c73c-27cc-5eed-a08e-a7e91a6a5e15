@@ -37,6 +37,36 @@ def lex_key(seq):
     return tuple((0, "") if m is None else (1, m) for m in seq)
 
 
+def assert_hall_witness(result, reviewers, manuscripts, edges):
+    """Hall 证人通用不变量（对任意无完美匹配的输入成立）。"""
+    witness = result.hall_witness
+    assert witness is not None
+    # 列表按 ID 排序且证人非空。
+    assert witness.reviewer_ids == sorted(witness.reviewer_ids)
+    assert witness.neighboring_manuscript_ids == sorted(
+        witness.neighboring_manuscript_ids
+    )
+    assert witness.reviewer_ids
+    assert set(witness.reviewer_ids) <= set(reviewers)
+    assert set(witness.neighboring_manuscript_ids) <= set(manuscripts)
+    # 邻居集合必须**恰为**证人评审人在原 allowed_pairings 中的全部邻居。
+    edge_set = set(edges)
+    true_neighbors = {
+        m
+        for r in witness.reviewer_ids
+        for m in manuscripts
+        if (r, m) in edge_set
+    }
+    assert set(witness.neighboring_manuscript_ids) == true_neighbors
+    # deficiency = 评审人数 - 邻居数 = 全局未匹配评审人数。
+    assert witness.deficiency == len(witness.reviewer_ids) - len(
+        witness.neighboring_manuscript_ids
+    )
+    assert witness.deficiency == len(reviewers) - result.max_matching_size
+    assert witness.deficiency == len(result.unmatched_reviewers)
+    assert witness.deficiency >= 1
+
+
 @pytest.mark.parametrize("seed", range(200))
 def test_audit_matches_bruteforce(seed):
     import random
@@ -71,6 +101,7 @@ def test_audit_matches_bruteforce(seed):
         # 确定性：与字典序最小的 null-aware 最大匹配一致。
         canon = lex_smallest_bruteforce(reviewers, manuscripts, edges, perfects)
         assert sorted(result.pairs) == sorted(canon)
+        assert_hall_witness(result, reviewers, manuscripts, edges)
         return
 
     assert result.perfect_match_exists is True
@@ -139,3 +170,83 @@ def test_known_forced_edges():
     assert by_r["r0"] == ("m0", False)
     assert by_r["r1"] == ("m1", False)
     assert by_r["r2"] == ("m2", True)
+
+
+def test_hall_witness_multi_deficiency():
+    """缺口大于 1：四名评审人共享唯一邻居 m0，r4 自给自足。
+
+    最大匹配基数为 2（m0 与 m1 各匹配一人），全局缺口为 3，
+    证人必须一次暴露全部 3 人缺口而非逐一枚举。
+    """
+    reviewers = ["r0", "r1", "r2", "r3", "r4"]
+    manuscripts = ["m0", "m1", "m2", "m3", "m4"]
+    edges = [(f"r{i}", "m0") for i in range(4)] + [
+        ("r4", "m1"),
+        ("r4", "m2"),
+        ("r4", "m3"),
+        ("r4", "m4"),
+    ]
+    result = run_audit(reviewers, manuscripts, edges)
+    assert result.perfect_match_exists is False
+    assert result.max_matching_size == 2
+    assert len(result.unmatched_reviewers) == 3
+    witness = result.hall_witness
+    assert witness.reviewer_ids == ["r0", "r1", "r2", "r3"]
+    assert witness.neighboring_manuscript_ids == ["m0"]
+    assert witness.deficiency == 3
+
+
+def test_hall_witness_includes_matched_reviewers():
+    """证人可包含已匹配评审人：r2 被匹配，但仍在缺口子集中。
+
+    r0/r1/r2 共同竞争唯一稿件 m0；字典序最小匹配把 m0 分给 r2，
+    未匹配者为 {r0, r1}。若只取未匹配者，邻居仍为 {m0}，缺口只有 1，
+    小于全局缺口 2 —— 必须沿交替路径把 r2 一并纳入。
+    """
+    reviewers = ["r0", "r1", "r2", "r3"]
+    manuscripts = ["m0", "m1", "m2", "m3"]
+    edges = [("r0", "m0"), ("r1", "m0"), ("r2", "m0"), ("r3", "m3")]
+    result = run_audit(reviewers, manuscripts, edges)
+    assert result.perfect_match_exists is False
+    assert result.max_matching_size == 2
+    assert result.unmatched_reviewers == ["r0", "r1"]
+    witness = result.hall_witness
+    assert witness.reviewer_ids == ["r0", "r1", "r2"]
+    assert witness.neighboring_manuscript_ids == ["m0"]
+    assert witness.deficiency == 2
+    # 证人真包含未匹配集合（含已匹配的 r2），且为全体评审人的真子集。
+    assert set(result.unmatched_reviewers) < set(witness.reviewer_ids)
+    assert set(witness.reviewer_ids) < set(reviewers)
+
+
+def test_hall_witness_non_obvious_subset():
+    """非显然 Hall 子集：未匹配者自身的邻居并不构成缺口。
+
+    r0 未匹配，但其邻居 {m0, m1} 多达两个，单独看不违反 Hall 条件；
+    沿交替路径可达 r1（经 m0）与 r2（经 m1），三者合起来只有
+    {m0, m1} 两个邻居，缺口 1 恰为全局缺口。
+    """
+    reviewers = ["r0", "r1", "r2"]
+    manuscripts = ["m0", "m1", "m2"]
+    edges = [("r0", "m0"), ("r0", "m1"), ("r1", "m0"), ("r2", "m1")]
+    result = run_audit(reviewers, manuscripts, edges)
+    assert result.perfect_match_exists is False
+    assert result.max_matching_size == 2
+    assert result.unmatched_reviewers == ["r0"]
+    witness = result.hall_witness
+    assert witness.reviewer_ids == ["r0", "r1", "r2"]
+    assert witness.neighboring_manuscript_ids == ["m0", "m1"]
+    assert witness.deficiency == 1
+
+
+def test_hall_witness_empty_neighborhood():
+    """极端情形：未匹配评审人没有任何允许配对，邻居集为空。"""
+    reviewers = ["r0", "r1", "r2"]
+    manuscripts = ["m0", "m1", "m2"]
+    edges = [("r0", "m0"), ("r1", "m1")]
+    result = run_audit(reviewers, manuscripts, edges)
+    assert result.perfect_match_exists is False
+    witness = result.hall_witness
+    assert witness.reviewer_ids == ["r2"]
+    assert witness.neighboring_manuscript_ids == []
+    assert witness.deficiency == 1
